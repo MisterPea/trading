@@ -1,0 +1,6 @@
+.DS_Store
+schwab_streamer/.env
+schwab_streamer/token.json
+schwab_streamer/.idea
+schwab_streamer/.venv
+.idea
