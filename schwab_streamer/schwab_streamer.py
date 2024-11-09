@@ -23,6 +23,7 @@ class SchwabStreaming:
         self.websocket = None
         self.stop = False
         self.loop = None
+        self.callbacks = {}
         self._running = Event()
         self._initialize_event_loop()
 
@@ -38,12 +39,22 @@ class SchwabStreaming:
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
 
-    def subscribe(self, service, keys, fields):
+    async def _ensure_connection(self):
+        """Ensure websocket connection is established"""
+        if not self.websocket:
+            await self.get_streamer_info()
+            await self.open_connection()
+
+    def subscribe(self, service, keys, fields, callback=None):
         """Synchronous method to subscribe to a service"""
         if not self.websocket:
             # If not connected, establish connection first
             future = asyncio.run_coroutine_threadsafe(self._ensure_connection(), self.loop)
             future.result()  # Wait for connection to be established
+
+        # Store callback location
+        subscription_key = f"{service}_{keys}"
+        self.callbacks[subscription_key] = callback
 
         # Now subscribe
         future = asyncio.run_coroutine_threadsafe(
@@ -51,12 +62,6 @@ class SchwabStreaming:
             self.loop
         )
         return future.result()
-
-    async def _ensure_connection(self):
-        """Ensure websocket connection is established"""
-        if not self.websocket:
-            await self.get_streamer_info()
-            await self.open_connection()
 
     async def _subscribe(self, service, keys, fields):
         """Async implementation of subscribe"""
@@ -77,6 +82,45 @@ class SchwabStreaming:
             return True
         except Exception as e:
             logger.error(f"Error during subscription: {e}")
+            return False
+
+    def add_screener_equity(self, index, sort_field, frequency):
+        """Synchronous method to screen advancers and decliners"""
+        if not self.websocket:
+            # If not connected, establish connection first
+            future = asyncio.run_coroutine_threadsafe(self._ensure_connection(), self.loop)
+            future.result()  # Wait for connection to be established
+
+        # Now screen
+        future = asyncio.run_coroutine_threadsafe(
+            self._add_screener_equity(index, sort_field, frequency),
+            self.loop
+        )
+        return future.result()
+
+    async def _add_screener_equity(self, index, sort_field, frequency):
+        """Get advancers and decliners.
+        index can be: $COMPX $DJI, $SPX, INDEX_ALL, NYSE, NASDAQ, OTCBB, EQUITY_ALL
+        sort_field can be:VOLUME, TRADES, PERCENT_CHANGE_UP, PERCENT_CHANGE_DOWN, AVERAGE_PERCENT_VOLUME
+        frequency can be: 0, 1, 5, 10, 30 60 minutes (0 is for all day)
+        """
+        request = {
+            "service": "SCREENER_EQUITY",
+            "requestid": str(int(round(time.time() * 1000))),
+            "command": "SUBS",
+            "SchwabClientCustomerId": self.customer_id,
+            "SchwabClientCorrelId": self.core_rel_id,
+            "parameters": {
+                "keys": f"{index}_{sort_field}_{frequency}",
+                "fields": "0,1,2,3,4"
+            }
+        }
+        json_request = json.dumps(request)
+        try:
+            await self.websocket.send(json_request)
+            return True
+        except Exception as e:
+            logger.error(f"Error during screening: {e}")
             return False
 
     async def get_streamer_info(self):
@@ -126,13 +170,27 @@ class SchwabStreaming:
             try:
                 message = await self.websocket.recv()
                 json_message = json.loads(message)
-                if "notify" not in json_message and 'response' in json_message:
-                    logger.info(f"RESPONSE: {json_message['response'][0]}")
-                if "notify" not in json_message and 'data' in json_message:
-                    logger.info(f"DATA: {json_message['data'][0]}")
+
                 if "notify" in json_message:
                     logger.info(f"NOTIFY: {json_message['notify'][0]}")
-
+                elif "notify" not in json_message and 'response' in json_message:
+                    logger.info(f"RESPONSE: {json_message['response'][0]}")
+                elif "notify" not in json_message and 'data' in json_message:
+                    logger.info(f"DATA: {json_message['data'][0]}")
+                    json_message = json_message['data'][0]
+                    service = json_message.get('service')
+                    content = json_message.get('content',[])
+                    # Process each item
+                    for item in content:
+                        key = item.get('key')
+                        if key:
+                            subscription_key = f"{service}_{key}"
+                            callback = self.callbacks.get(subscription_key)
+                            if callback:
+                                try:
+                                    callback(item)
+                                except Exception as e:
+                                    logger.error(f"Error in callback: {e}")
 
             except websockets.exceptions.ConnectionClosedError as e:
                 logger.error(f"Connection closed with error: {e}")
@@ -177,26 +235,3 @@ class SchwabStreaming:
         except KeyboardInterrupt:
             logger.info("Shutting down...")
             self.close()
-
-
-streamer = SchwabStreaming()
-try:
-    streamer.wait_forever()
-except KeyboardInterrupt:
-    streamer.close()
-
-# Subscribe to different services
-streamer.subscribe(
-    service="LEVELONE_FUTURES",
-    keys="/ESZ24",
-    fields="0,1,2,3,4,5,6,7,8,9,10"
-)
-
-# Add more subscriptions as needed
-streamer.subscribe(
-    service="LEVELONE_FUTURES",
-    keys="/NQZ24",
-    fields="0,1,2,3,4,5,6,7,8,9,10"
-)
-
-# Keep the program running
