@@ -13,6 +13,14 @@ logger = logging.getLogger(__name__)
 
 
 class SchwabStreaming:
+    """To use, we call subscribe/add then wait_forever()—e.g.:
+    def my_data(data):
+        print("MY_DATA:", data)
+    streamer = SchwabStreaming()
+    streamer.subscribe(service="LEVELONE_FUTURES", keys="/ESZ24,/GCZ24", fields="0,1,2,3,8,10,12,13", callback=my_data)
+    streamer.wait_forever()
+    """
+
     def __init__(self):
         self.socket_address = None
         self.customer_id = None
@@ -53,8 +61,10 @@ class SchwabStreaming:
             future.result()  # Wait for connection to be established
 
         # Store callback location
-        subscription_key = f"{service}_{keys}"
-        self.callbacks[subscription_key] = callback
+        # if we're subscribing to multiple securities we assign them to the same function
+        subscription_list = [f"{service}_{k}" for k in keys.split(',')]
+        for sl in subscription_list:
+            self.callbacks[sl] = callback
 
         # Now subscribe
         future = asyncio.run_coroutine_threadsafe(
@@ -127,6 +137,7 @@ class SchwabStreaming:
         """Get websocket and account info"""
         response = UserData().get_user_prefs()
         streamer_info = response['streamerInfo'][0]
+
         if response:
             self.access_token = response["access_token"]
             self.socket_address = streamer_info["streamerSocketUrl"]
@@ -179,7 +190,7 @@ class SchwabStreaming:
                     logger.info(f"DATA: {json_message['data'][0]}")
                     json_message = json_message['data'][0]
                     service = json_message.get('service')
-                    content = json_message.get('content',[])
+                    content = json_message.get('content', [])
                     # Process each item
                     for item in content:
                         key = item.get('key')
